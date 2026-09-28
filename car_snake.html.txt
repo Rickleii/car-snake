@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<!-- 移动端视口：禁止缩放，适配手机竖屏 -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>贪吃车</title>
+<style>
+  /* ========== 全局样式 ========== */
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent; /* 去掉手机点击高亮 */
+  }
+  body {
+    background: linear-gradient(180deg, #141a2b 0%, #1c2438 100%);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #fff;
+    user-select: none;              /* 禁止选中文字 */
+    touch-action: manipulation;     /* 防止双击缩放 */
+    padding: 10px;
+  }
+
+  /* ========== 游戏舞台（画布 + 遮罩） ========== */
+  #stage {
+    position: relative;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  }
+  canvas {
+    display: block;
+    background: #232a3d;
+  }
+
+  /* ========== 得分栏（画布左上角上方） ========== */
+  #hud {
+    position: absolute;
+    top: 8px;
+    left: 10px;
+    font-size: 14px;
+    font-weight: bold;
+    text-shadow: 0 1px 3px rgba(0,0,0,.8);
+    pointer-events: none; /* 不挡触摸 */
+    line-height: 1.6;
+  }
+
+  /* ========== 游戏结束遮罩 ========== */
+  #overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65); /* 半透明黑色遮罩 */
+    display: none;                    /* 默认隐藏 */
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    text-align: center;
+  }
+  #overlay.show { display: flex; }
+  #overlay h1 {
+    font-size: 26px;
+    color: #ff6b6b;
+  }
+  #overlay p { font-size: 15px; color: #ccc; }
+  #btnRestart {
+    margin-top: 8px;
+    padding: 12px 36px;
+    font-size: 18px;
+    font-weight: bold;
+    color: #fff;
+    background: #ff6b35;
+    border: none;
+    border-radius: 30px;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(255, 107, 53, 0.4);
+  }
+  #btnRestart:active { transform: scale(0.95); }
+
+  /* ========== 虚拟方向键 ========== */
+  #dpad {
+    margin-top: 18px;
+    display: grid;
+    grid-template-columns: repeat(3, 68px);
+    grid-template-rows: repeat(3, 68px);
+    gap: 8px;
+  }
+  .dbtn {
+    border: none;
+    border-radius: 14px;
+    background: #2e3852;
+    color: #ffd45e;
+    font-size: 26px;
+    cursor: pointer;
+    box-shadow: 0 3px 0 #1a2236;
+  }
+  .dbtn:active { background: #3d4a6b; transform: translateY(2px); box-shadow: none; }
+  .up    { grid-area: 1 / 2; }
+  .left  { grid-area: 2 / 1; }
+  .down  { grid-area: 2 / 2; }
+  .right { grid-area: 2 / 3; }
+</style>
+</head>
+<body>
+
+  <!-- 游戏舞台 -->
+  <div id="stage">
+    <canvas id="gameCanvas"></canvas>
+    <!-- 得分显示（左上角） -->
+    <div id="hud"></div>
+    <!-- 游戏结束遮罩 -->
+    <div id="overlay">
+      <h1>💥 游戏结束</h1>
+      <p id="finalText"></p>
+      <button id="btnRestart">重新开始</button>
+    </div>
+  </div>
+
+  <!-- 手机虚拟方向键 -->
+  <div id="dpad">
+    <button class="dbtn up"    data-dir="up">▲</button>
+    <button class="dbtn left"  data-dir="left">◀</button>
+    <button class="dbtn down"  data-dir="down">▼</button>
+    <button class="dbtn right" data-dir="right">▶</button>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ================= 游戏常量配置 ================= */
+  const COLS = 20;              // 网格列数
+  const ROWS = 20;              // 网格行数
+  const BASE_SPEED = 160;       // 初始移动间隔（毫秒）
+  const MIN_SPEED  = 70;        // 最快移动间隔
+  const HS_KEY = 'carSnakeHighScore'; // localStorage 最高分键名
+
+  /* ================= DOM 元素 ================= */
+  const canvas    = document.getElementById('gameCanvas');
+  const ctx       = canvas.getContext('2d');
+  const hud       = document.getElementById('hud');
+  const overlay   = document.getElementById('overlay');
+  const finalText = document.getElementById('finalText');
+  const btnRestart= document.getElementById('btnRestart');
+
+  /* ================= 游戏状态变量 ================= */
+  let cellSize = 0;   // 每个格子的像素尺寸
+  let snake = [];     // 蛇身数组，snake[0] 为车头
+  let dir = null;     // 当前实际方向
+  let nextDir = null; // 缓存的下一方向（防止一步内连转导致自撞）
+  let food = null;    // 当前食物 {x, y, type}
+  let score = 0;      // 当前得分
+  let highScore = 0;  // 历史最高分
+  let alive = false;  // 是否存活
+  let timerId = null; // 定时器句柄
+
+  // 读取本地最高分（try/catch 防止隐私模式报错）
+  try { highScore = Number(localStorage.getItem(HS_KEY)) || 0; } catch (e) {}
+
+  /* ================= 画布自适应（手机竖屏） ================= */
+  function setupCanvas() {
+    // 画布边长 = 屏幕宽与剩余高度中较小者，最大 420px
+    const size = Math.floor(Math.min(
+      window.innerWidth - 20,
+      window.innerHeight - 260,
+      420
+    ));
+    const dpr = window.devicePixelRatio || 1; // 高分屏清晰度
+    canvas.style.width  = size + 'px';
+    canvas.style.height = size + 'px';
+    canvas.width  = size * dpr;
+    canvas.height = size * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cellSize = size / COLS;
+    draw();
+  }
+  window.addEventListener('resize', setupCanvas);
+
+  /* ================= 游戏初始化 / 重开 ================= */
+  function startGame() {
+    // 初始车身：三节，位于地图中间，向右行驶
+    const cy = Math.floor(ROWS / 2);
+    snake = [
+      { x: 8, y: cy },
+      { x: 7, y: cy },
+      { x: 6, y: cy }
+    ];
+    dir = { x: 1, y: 0 };       // 初始方向：右
+    nextDir = { x: 1, y: 0 };
+    score = 0;
+    alive = true;
+    overlay.classList.remove('show');
+    spawnFood();
+    scheduleTick();
+  }
+
+  /* ================= 按当前得分计算速度并调度下一帧 ================= */
+  function scheduleTick() {
+    clearTimeout(timerId);
+    const speed = Math.max(MIN_SPEED, BASE_SPEED - score * 3);
+    timerId = setTimeout(tick, speed);
+  }
+
+  /* ================= 核心逻辑：每一步移动 ================= */
+  function tick() {
+    if (!alive) return;
+    dir = nextDir; // 应用缓存的转向
+
+    // 计算新车头位置
+    const head = {
+      x: snake[0].x + dir.x,
+      y: snake[0].y + dir.y
+    };
+
+    // 撞墙判定：车头越出网格边界
+    if (head.x < 0 || head.x >= COLS || head.y < 0 || head.y >= ROWS) {
+      return gameOver();
+    }
+    // 撞自己判定：车头与身体任一节重合
+    if (snake.some(function (s) { return s.x === head.x && s.y === head.y; })) {
+      return gameOver();
+    }
+
+    // 车头入列
+    snake.unshift(head);
+
+    // 吃到食物：加分并生成新食物（车身自然加长，因为不 pop 尾巴）
+    if (head.x === food.x && head.y === food.y) {
+      score += (food.type === 'coin') ? 3 : 1; // 金币 3 分，燃料罐 1 分
+      spawnFood();
+    } else {
+      snake.pop(); // 没吃到则尾部出列
+    }
+
+    draw();
+    scheduleTick();
+  }
+
+  /* ================= 随机生成食物（避开蛇身） ================= */
+  function spawnFood() {
+    let p;
+    do {
+      p = {
+        x: Math.floor(Math.random() * COLS),
+        y: Math.floor(Math.random() * ROWS)
+      };
+    } while (snake.some(function (s) { return s.x === p.x && s.y === p.y; }));
+    // 30% 概率是金币，70% 是燃料罐
+    p.type = Math.random() < 0.3 ? 'coin' : 'fuel';
+    food = p;
+  }
+
+  /* ================= 游戏结束 ================= */
+  function gameOver() {
+    alive = false;
+    clearTimeout(timerId);
+    if (score > highScore) {
+      highScore = score;
+      try { localStorage.setItem(HS_KEY, String(highScore)); } catch (e) {}
+    }
+    finalText.innerHTML = '本局得分：<b>' + score + '</b><br>最高纪录：' + highScore;
+    overlay.classList.add('show'); // 显示半透明遮罩 + 重新开始按钮
+    draw();
+  }
+
+  /* ================= 绘制 ================= */
+  function draw() {
+    const size = cellSize * COLS;
+    ctx.clearRect(0, 0, size, size);
+
+    // ---- 背景网格（路面感）----
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.lineWidth = 1;
+    for (let i = 1; i < COLS; i++) {
+      ctx.beginPath(); ctx.moveTo(i * cellSize, 0); ctx.lineTo(i * cellSize, size); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, i * cellSize); ctx.lineTo(size, i * cellSize); ctx.stroke();
+    }
+
+    // ---- 食物：黄色圆形 ----
+    if (food) {
+      const cx = (food.x + 0.5) * cellSize;
+      const cy = (food.y + 0.5) * cellSize;
+      const r  = cellSize * 0.35;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffd400';          // 黄色圆
+      ctx.fill();
+      ctx.strokeStyle = '#b89400';
+      ctx.stroke();
+      if (food.type === 'coin') {
+        // 金币：内部画一个 ¥ 符号
+        ctx.fillStyle = '#8a6d00';
+        ctx.font = 'bold ' + Math.floor(cellSize * 0.5) + 'px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('¥', cx, cy + 1);
+      } else {
+        // 燃料罐：顶部画一个油罐盖
+        ctx.fillStyle = '#8a6d00';
+        ctx.fillRect(cx - cellSize * 0.12, cy - r - cellSize * 0.15, cellSize * 0.24, cellSize * 0.12);
+      }
+    }
+
+    // ---- 蛇身：蓝色矩形车厢（带 2px 间隙更有分段感）----
+    for (let i = snake.length - 1; i >= 1; i--) {
+      const s = snake[i];
+      ctx.fillStyle = i % 2 === 0 ? '#4a7bd4' : '#3a63ad'; // 深浅交替
+      ctx.fillRect(s.x * cellSize + 2, s.y * cellSize + 2,
+                   cellSize - 4, cellSize - 4);
+      // 车厢高光线
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      ctx.fillRect(s.x * cellSize + 2, s.y * cellSize + 2,
+                   cellSize - 4, 3);
+    }
+
+    // ---- 车头：红色矩形小车 ----
+    const h = snake[0];
+    const hx = h.x * cellSize, hy = h.y * cellSize;
+    ctx.fillStyle = '#ff5252'; // 红色车头
+    ctx.fillRect(hx + 1, hy + 1, cellSize - 2, cellSize - 2);
+    // 挡风玻璃（按行进方向绘制在前端）
+    ctx.fillStyle = '#b3e5fc';
+    const g = cellSize * 0.2;
+    if (dir.x === 1)       ctx.fillRect(hx + cellSize - g - 3, hy + g, 3, cellSize - g * 2);
+    else if (dir.x === -1) ctx.fillRect(hx + 3, hy + g, 3, cellSize - g * 2);
+    else if (dir.y === 1)  ctx.fillRect(hx + g, hy + cellSize - g - 3, cellSize - g * 2, 3);
+    else                   ctx.fillRect(hx + g, hy + 3, cellSize - g * 2, 3);
+    // 车轮（四个深色小方块）
+    ctx.fillStyle = '#222';
+    const w = cellSize * 0.16, o = cellSize * 0.14;
+    ctx.fillRect(hx + o, hy - w / 2 + 1, w, w);
+    ctx.fillRect(hx + cellSize - o - w, hy - w / 2 + 1, w, w);
+    ctx.fillRect(hx + o, hy + cellSize - w / 2 - 1, w, w);
+    ctx.fillRect(hx + cellSize - o - w, hy + cellSize - w / 2 - 1, w, w);
+
+    // ---- HUD 得分（左上角）----
+    hud.innerHTML = '得分：' + score + '<br>最高：' + highScore;
+  }
+
+  /* ================= 键盘控制 ================= */
+  const KEY_MAP = {
+    ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
+    KeyW: 'up', KeyS: 'down', KeyA: 'left', KeyD: 'right'
+  };
+  document.addEventListener('keydown', function (e) {
+    const name = KEY_MAP[e.code] || KEY_MAP[e.key];
+    if (name) { e.preventDefault(); setDir(name); }
+  });
+
+  /* ================= 虚拟方向键（触摸 + 鼠标） ================= */
+  document.querySelectorAll('.dbtn').forEach(function (btn) {
+    btn.addEventListener('pointerdown', function (e) {
+      e.preventDefault();          // 防止触发滚动/缩放
+      setDir(btn.dataset.dir);
+    });
+  });
+
+  /* ================= 设置方向（禁止 180 度掉头） ================= */
+  function setDir(name) {
+    if (!alive) return;
+    const map = {
+      up:    { x: 0,  y: -1 },
+      down:  { x: 0,  y: 1 },
+      left:  { x: -1, y: 0 },
+      right: { x: 1,  y: 0 }
+    };
+    const nd = map[name];
+    if (!nd) return;
+    // 如果新方向与当前方向正好相反，则忽略（车不能原地掉头）
+    if (nd.x === -dir.x && nd.y === -dir.y) return;
+    nextDir = nd;
+  }
+
+  /* ================= 重新开始按钮 ================= */
+  btnRestart.addEventListener('click', startGame);
+
+  /* ================= 启动 ================= */
+  setupCanvas();
+  startGame();
+})();
+</script>
+</body>
+</html>
